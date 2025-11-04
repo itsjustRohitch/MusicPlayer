@@ -11,7 +11,8 @@ data class Song(
     val artist: String,
     val contentUri: Uri,
     val albumArtUri: Uri?,
-    val albumId: Long, // Added for correct album filtering
-    val filePath: String, // Added for folder browsing
+    val albumId: Long,
+    val filePath: String,
     val duration: Long
 ) : Parcelable
+

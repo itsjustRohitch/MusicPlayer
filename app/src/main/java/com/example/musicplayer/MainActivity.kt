@@ -22,9 +22,11 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -32,6 +34,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -39,6 +42,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,6 +54,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.NavDestination.Companion.hierarchy
@@ -172,30 +177,92 @@ fun SearchBar(query: String, onQueryChange: (String) -> Unit, modifier: Modifier
 }
 
 @Composable
-fun SongItem(song: Song, onClick: () -> Unit) {
+fun SongItem(
+    song: Song,
+    onClick: () -> Unit,
+    // We add an optional slot for a trailing button (like "Add" or "Remove")
+    trailingContent: (@Composable () -> Unit)? = null
+) {
     ListItem(
         headlineContent = { Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = { Text(song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         leadingContent = {
             AsyncImage(model = song.albumArtUri, contentDescription = "Album Art", modifier = Modifier.size(56.dp).clip(MaterialTheme.shapes.small), contentScale = ContentScale.Crop)
         },
+        trailingContent = trailingContent,
         modifier = Modifier.clickable(onClick = onClick)
     )
 }
+
+// A dialog that shows a list of playlists to add a song to
+@Composable
+fun AddToPlaylistDialog(
+    song: Song,
+    songViewModel: SongViewModel,
+    onDismiss: () -> Unit
+) {
+    val playlists by songViewModel.playlists.collectAsStateWithLifecycle()
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Add to playlist", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(16.dp))
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    items(playlists) { playlist ->
+                        ListItem(
+                            headlineContent = { Text(playlist.name) },
+                            leadingContent = { Icon(Icons.AutoMirrored.Filled.PlaylistPlay, null) },
+                            modifier = Modifier.clickable {
+                                songViewModel.addSongToPlaylist(playlist.id, song)
+                                onDismiss()
+                            }
+                        )
+                    }
+                }
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                    Text("CANCEL")
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 fun SongListScreen(navController: NavController, songViewModel: SongViewModel) {
     val filteredSongs by songViewModel.filteredSongs.collectAsStateWithLifecycle()
     val searchQuery by songViewModel.searchQuery.collectAsStateWithLifecycle()
 
+    // State to manage which song (if any) is being added to a playlist
+    var songToAddToPlaylist by remember { mutableStateOf<Song?>(null) }
+
+    // If a song is selected, show the "Add to Playlist" dialog
+    songToAddToPlaylist?.let { song ->
+        AddToPlaylistDialog(
+            song = song,
+            songViewModel = songViewModel,
+            onDismiss = { songToAddToPlaylist = null }
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
         SearchBar(query = searchQuery, onQueryChange = { songViewModel.onSearchQueryChanged(it) })
         LazyColumn {
             items(filteredSongs) { song ->
-                SongItem(song = song, onClick = {
-                    songViewModel.setPlayQueue(filteredSongs, filteredSongs.indexOf(song))
-                    navController.navigate("player_screen")
-                })
+                SongItem(
+                    song = song,
+                    onClick = {
+                        songViewModel.setPlayQueue(filteredSongs, filteredSongs.indexOf(song))
+                        navController.navigate("player_screen")
+                    },
+                    // Add a trailing button to add this song to a playlist
+                    trailingContent = {
+                        IconButton(onClick = { songToAddToPlaylist = song }) {
+                            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = "Add to playlist")
+                        }
+                    }
+                )
             }
         }
     }
@@ -232,9 +299,17 @@ fun FolderListScreen(navController: NavController, songViewModel: SongViewModel)
         LazyColumn {
             items(filteredFolders) { folder ->
                 ListItem(
-                    headlineContent = { Text(folder.name) },
+                    // --- FIX 1: "Shabby Naming" ---
+                    // We display `folder.path` (the short name) instead of `folder.name` (the full path)
+                    // This assumes the view model is creating folders as MusicFolder(name = fullPath, path = shortName)
+                    // which seems to be the case from your screenshot.
+                    headlineContent = { Text(folder.path) },
                     leadingContent = { Icon(Icons.Default.Folder, null) },
-                    modifier = Modifier.clickable { navController.navigate("folder_detail/${URLEncoder.encode(folder.path, StandardCharsets.UTF_8.toString())}/${URLEncoder.encode(folder.name, StandardCharsets.UTF_8.toString())}") }
+                    modifier = Modifier.clickable {
+                        // --- FIX 2: "Shabby Naming" (Navigation) ---
+                        // We pass the full path (folder.name) as the path, and the short name (folder.path) as the name.
+                        navController.navigate("folder_detail/${URLEncoder.encode(folder.name, StandardCharsets.UTF_8.toString())}/${URLEncoder.encode(folder.path, StandardCharsets.UTF_8.toString())}")
+                    }
                 )
             }
         }
@@ -292,14 +367,35 @@ fun PlaylistListScreen(navController: NavController, songViewModel: SongViewMode
 @Composable
 fun AlbumDetailScreen(navController: NavController, songViewModel: SongViewModel, albumId: Long, albumTitle: String) {
     val songs = songViewModel.getSongsForAlbum(albumId)
+
+    // State to manage which song (if any) is being added to a playlist
+    var songToAddToPlaylist by remember { mutableStateOf<Song?>(null) }
+
+    songToAddToPlaylist?.let { song ->
+        AddToPlaylistDialog(
+            song = song,
+            songViewModel = songViewModel,
+            onDismiss = { songToAddToPlaylist = null }
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
         Text(albumTitle, style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(16.dp))
         LazyColumn {
             items(songs) { song ->
-                SongItem(song = song, onClick = {
-                    songViewModel.setPlayQueue(songs, songs.indexOf(song))
-                    navController.navigate("player_screen")
-                })
+                SongItem(
+                    song = song,
+                    onClick = {
+                        songViewModel.setPlayQueue(songs, songs.indexOf(song))
+                        navController.navigate("player_screen")
+                    },
+                    // Add a trailing button to add this song to a playlist
+                    trailingContent = {
+                        IconButton(onClick = { songToAddToPlaylist = song }) {
+                            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = "Add to playlist")
+                        }
+                    }
+                )
                 HorizontalDivider()
             }
         }
@@ -308,16 +404,87 @@ fun AlbumDetailScreen(navController: NavController, songViewModel: SongViewModel
 
 @Composable
 fun FolderDetailScreen(navController: NavController, songViewModel: SongViewModel, folderPath: String, folderName: String) {
+    // --- FIX 3: "Empty Folders" ---
+
+    // 1. Get songs that are *directly* in this folder
     val songs = songViewModel.getSongsForFolder(folderPath)
+
+    // 2. Get *all* folders from the view model
+    val allFolders by songViewModel.filteredFolders.collectAsStateWithLifecycle()
+
+    // 3. Find *direct* sub-folders of the current folder
+    val subFolders = allFolders.filter { folder ->
+        // A sub-folder's name (full path) must start with the current folder's path + "/"
+        folder.name.startsWith(folderPath + "/") &&
+                // We only want direct children, so we check if there are any *more* slashes
+                // e.g., "THEMES/MARVEL" is a child, but "THEMES/MARVEL/POSTERS" is not
+                !folder.name.substringAfter(folderPath + "/").contains('/')
+    }
+
+    // State to manage the "Add to Playlist" dialog
+    var songToAddToPlaylist by remember { mutableStateOf<Song?>(null) }
+
+    songToAddToPlaylist?.let { song ->
+        AddToPlaylistDialog(
+            song = song,
+            songViewModel = songViewModel,
+            onDismiss = { songToAddToPlaylist = null }
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
+        // Display the short, clean name we passed in
         Text(folderName, style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(16.dp))
         LazyColumn {
+            // 4. List all the sub-folders first
+            items(subFolders) { subFolder ->
+                ListItem(
+                    // Display the sub-folder's short name
+                    headlineContent = { Text(subFolder.path) },
+                    leadingContent = { Icon(Icons.Default.Folder, null) },
+                    modifier = Modifier.clickable {
+                        // Allow navigating deeper into sub-folders
+                        navController.navigate("folder_detail/${URLEncoder.encode(subFolder.name, StandardCharsets.UTF_8.toString())}/${URLEncoder.encode(subFolder.path, StandardCharsets.UTF_8.toString())}")
+                    }
+                )
+            }
+
+            // 5. Add a divider if we have both sub-folders and songs
+            if (subFolders.isNotEmpty() && songs.isNotEmpty()) {
+                item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+            }
+
+            // 6. List all the songs in this folder
             items(songs) { song ->
-                SongItem(song = song, onClick = {
-                    songViewModel.setPlayQueue(songs, songs.indexOf(song))
-                    navController.navigate("player_screen")
-                })
-                HorizontalDivider()
+                SongItem(
+                    song = song,
+                    onClick = {
+                        songViewModel.setPlayQueue(songs, songs.indexOf(song))
+                        navController.navigate("player_screen")
+                    },
+                    // Add a trailing button to add this song to a playlist
+                    trailingContent = {
+                        IconButton(onClick = { songToAddToPlaylist = song }) {
+                            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = "Add to playlist")
+                        }
+                    }
+                )
+            }
+
+            // 7. Show a message if the folder is truly empty
+            if (subFolders.isEmpty() && songs.isEmpty()) {
+                item {
+                    Text(
+                        "This folder is empty.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        // --- HERE IS THE FIX ---
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        // --- END FIX ---
+                    )
+                }
             }
         }
     }
@@ -330,10 +497,21 @@ fun PlaylistDetailScreen(navController: NavController, songViewModel: SongViewMo
         Text(playlistName, style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(16.dp))
         LazyColumn {
             items(songs) { song ->
-                SongItem(song = song, onClick = {
-                    songViewModel.setPlayQueue(songs, songs.indexOf(song))
-                    navController.navigate("player_screen")
-                })
+                SongItem(
+                    song = song,
+                    onClick = {
+                        songViewModel.setPlayQueue(songs, songs.indexOf(song))
+                        navController.navigate("player_screen")
+                    },
+                    // Add a trailing button to REMOVE this song from the playlist
+                    trailingContent = {
+                        IconButton(onClick = {
+                            songViewModel.removeSongFromPlaylist(playlistId, song)
+                        }) {
+                            Icon(Icons.Default.RemoveCircleOutline, contentDescription = "Remove from playlist")
+                        }
+                    }
+                )
                 HorizontalDivider()
             }
         }

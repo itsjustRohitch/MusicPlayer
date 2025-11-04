@@ -16,11 +16,17 @@ import androidx.media3.session.SessionToken
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import android.net.Uri
 import androidx.core.net.toUri
+// Import the database classes from the correct package
+import com.example.musicplayer.database.MusicDatabase
+import com.example.musicplayer.database.PlaylistEntity
+import com.example.musicplayer.database.PlaylistSongCrossRef
 
 
 class SongViewModel(application: Application) : AndroidViewModel(application) {
+
+    // 1. Get an instance of the Database DAO
+    private val playlistDao = MusicDatabase.getDatabase(application).playlistDao()
 
     // -------------------------------
     // Music Data
@@ -28,14 +34,38 @@ class SongViewModel(application: Application) : AndroidViewModel(application) {
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
     private val _albums = MutableStateFlow<List<Album>>(emptyList())
     private val _folders = MutableStateFlow<List<MusicFolder>>(emptyList())
-    private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
     private val _searchQuery = MutableStateFlow("")
 
     val songs: StateFlow<List<Song>> = _songs.asStateFlow()
     val albums: StateFlow<List<Album>> = _albums.asStateFlow()
     val folders: StateFlow<List<MusicFolder>> = _folders.asStateFlow()
-    val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    // 3. The 'playlists' flow now directly reads from the database.
+    //    It combines the database results (which have song IDs) with the
+    //    '_songs' flow (which has the full Song objects) to build the final `List<Playlist>`.
+    val playlists: StateFlow<List<Playlist>> =
+        playlistDao.getAllPlaylistsWithSongs() // This now returns Flow<List<PlaylistWithSongRefs>>
+            .combine(songs) { playlistsFromDb, allSongs ->
+                // Create a song map for efficient, fast lookup
+                val songMap = allSongs.associateBy { it.id }
+
+                // Map the Database entities to our UI 'Playlist' model
+                playlistsFromDb.map { playlistWithRefs -> // <-- Renamed
+                    Playlist(
+                        id = playlistWithRefs.playlist.playlistId,
+                        name = playlistWithRefs.playlist.name,
+                        // --- THIS IS THE UPDATED LOGIC ---
+                        // 1. Get the list of 'PlaylistSongCrossRef' objects
+                        // 2. Map over it to extract just the 'songId' (a Long)
+                        // 3. Find that songId in our songMap
+                        songs = playlistWithRefs.songRefs.mapNotNull { songRef ->
+                            songMap[songRef.songId]
+                        }
+                    )
+                }
+            }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
 
     // -------------------------------
     // Playback State
@@ -184,18 +214,38 @@ class SongViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getSongsForFolder(folderPath: String) = _songs.value.filter { it.filePath.startsWith(folderPath) }
 
+    // 4. This now creates a new row in the 'playlists' table in the database.
     fun createPlaylist(name: String) {
-        val newPlaylist = Playlist(System.currentTimeMillis(), name, emptyList())
-        _playlists.update { it + newPlaylist }
-    }
-
-    fun addSongToPlaylist(playlistId: Long, song: Song) {
-        _playlists.update { playlists ->
-            playlists.map { if (it.id == playlistId) it.copy(songs = it.songs + song) else it }
+        viewModelScope.launch {
+            val newPlaylistEntity = PlaylistEntity(name = name)
+            playlistDao.createPlaylist(newPlaylistEntity)
         }
     }
 
-    fun getSongsForPlaylist(playlistId: Long) = _playlists.value.find { it.id == playlistId }?.songs ?: emptyList()
+    // 5. This now adds a new row to the 'playlist_song_cross_ref' table.
+    //    It links the given songId to the given playlistId.
+    fun addSongToPlaylist(playlistId: Long, song: Song) {
+        viewModelScope.launch {
+            val crossRef = PlaylistSongCrossRef(playlistId = playlistId, songId = song.id)
+            playlistDao.addSongToPlaylist(crossRef)
+        }
+    }
+
+    // --- NEW ---
+    // 7. This now removes a row from the 'playlist_song_cross_ref' table.
+    fun removeSongFromPlaylist(playlistId: Long, song: Song) {
+        viewModelScope.launch {
+            val crossRef = PlaylistSongCrossRef(playlistId = playlistId, songId = song.id)
+            playlistDao.removeSongFromPlaylist(crossRef)
+        }
+    }
+    // --- END NEW ---
+
+    // 6. This function now reads from the public 'playlists' StateFlow,
+    //    which is always kept in sync with the database.
+    fun getSongsForPlaylist(playlistId: Long): List<Song> {
+        return playlists.value.find { it.id == playlistId }?.songs ?: emptyList()
+    }
 
     // -------------------------------
     // Load Local Music
@@ -245,7 +295,17 @@ class SongViewModel(application: Application) : AndroidViewModel(application) {
                     val albumArtUri = "content://media/external/audio/albumart/$albumId".toUri()
                     val folderPath = data.substringBeforeLast('/')
 
-                    val song = Song(id, title, artist, contentUri, albumArtUri, albumId, folderPath, duration)
+                    // Use the non-database Song constructor
+                    val song = Song(
+                        id = id,
+                        title = title,
+                        artist = artist,
+                        contentUri = contentUri,
+                        albumArtUri = albumArtUri,
+                        albumId = albumId,
+                        filePath = folderPath,
+                        duration = duration
+                    )
                     songList.add(song)
                     albumMap.putIfAbsent(albumId, Album(albumId, album, artist, albumArtUri))
                     folderMap.putIfAbsent(folderPath, MusicFolder(folderPath, folderPath.substringAfterLast('/')))
